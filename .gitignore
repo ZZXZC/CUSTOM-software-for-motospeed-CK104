@@ -1,0 +1,40 @@
+# ---- Rust core ----
+target/
+**/*.rs.bk
+Cargo.lock.orig
+
+# ---- .NET / WPF ----
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+artifacts/
+publish/
+
+# ---- Build output we don't want in git ----
+build/
+out/
+dist/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+!**/lib/*.lib
+
+# ---- Reverse-engineering scratch space (contains vendor binaries) ----
+_capture/
+tools/*.log
+*.cap
+*.pcapng
+
+# ---- OS / editor ----
+Thumbs.db
+desktop.ini
+.DS_Store
+*.swp
+.idea/
+.vscode/

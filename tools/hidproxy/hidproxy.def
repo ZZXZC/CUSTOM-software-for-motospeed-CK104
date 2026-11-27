@@ -1,0 +1,13 @@
+; hidproxy.def -- export table for the logging HID.dll proxy.
+;
+; Only the four protocol-carrying functions we intercept are declared here
+; (a .def entry is required to export them without stdcall decoration).
+; The other 40 HID.dll exports are forwarded to hidreal.dll from the
+; `FWD(...)` pragmas in hidproxy.c -- link.exe does not accept
+; `name=module.name` forwarders in a .def file.
+LIBRARY HID
+EXPORTS
+    HidD_SetFeature
+    HidD_SetOutputReport
+    HidD_GetFeature
+    HidD_GetInputReport
