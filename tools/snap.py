@@ -15,6 +15,7 @@ import PIL.Image  # noqa: F401  (fail early if Pillow is missing)
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
 user32.FindWindowW.restype = wintypes.HWND
@@ -49,6 +50,14 @@ user32.SetForegroundWindow.restype = wintypes.BOOL
 user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
 user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 user32.IsWindowVisible.argtypes = [wintypes.HWND]
+user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+user32.AttachThreadInput.restype = wintypes.BOOL
+user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.BringWindowToTop.argtypes = [wintypes.HWND]
+kernel32.GetCurrentThreadId.argtypes = []
+kernel32.GetCurrentThreadId.restype = wintypes.DWORD
 
 SRCCOPY = 0x00CC0020
 DIB_RGB_COLORS = 0
@@ -56,9 +65,11 @@ PRF_CLIENT = 0x00000004
 PRF_CHILDREN = 0x00000010
 PRF_OWNED = 0x00000020
 HWND_TOP = 0
+SW_RESTORE = 9
 SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
 SWP_SHOWWINDOW = 0x0040
+PW_RENDERFULLCONTENT = 2
 
 
 class BITMAPINFOHEADER(ctypes.Structure):
@@ -107,15 +118,24 @@ def find_window(title: str, pid: int | None = None) -> int:
     return result[0][0]
 
 
-def capture(hwnd: int, out: str, use_screen: bool = True) -> None:
-    if use_screen:
-        # Put the target on top, otherwise the screen grab records whatever
-        # happens to be covering it.
+def capture(hwnd: int, out: str, use_screen: bool = True,
+            raise_window: bool = True) -> None:
+    if use_screen and raise_window:
+        # Foreground lock can silently reject SetForegroundWindow, leaving a
+        # different window on top of the region we grab.  Attaching our input
+        # queue to the target's first, then flashing ALT, gets around it.
+        tid = user32.GetWindowThreadProcessId(hwnd, None)
+        me = kernel32.GetCurrentThreadId()
+        attached = user32.AttachThreadInput(me, tid, True)
+        user32.ShowWindow(hwnd, SW_RESTORE)
         user32.SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0,
                             SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
         user32.SetForegroundWindow(hwnd)
+        user32.BringWindowToTop(hwnd)
+        if attached:
+            user32.AttachThreadInput(me, tid, False)
         import time
-        time.sleep(0.35)
+        time.sleep(0.4)
 
     rect = wintypes.RECT()
     user32.GetWindowRect(hwnd, ctypes.byref(rect))
@@ -129,23 +149,26 @@ def capture(hwnd: int, out: str, use_screen: bool = True) -> None:
         # composited background image that PrintWindow often misses.
         screen_dc = user32.GetDC(0)
         hdc = screen_dc
-        src_x, src_y = rect.left, rect.top
     else:
         screen_dc = None
         hdc = user32.GetWindowDC(hwnd)
-        src_x, src_y = rect.left, rect.top
 
     mem = gdi32.CreateCompatibleDC(hdc)
     bmp = gdi32.CreateCompatibleBitmap(hdc, w, h)
     gdi32.SelectObject(mem, bmp)
 
-    if not use_screen:
-        # Try PrintWindow first for occluded windows, then fall back to BitBlt.
-        ok = user32.PrintWindow(hwnd, mem, PRF_CLIENT | PRF_CHILDREN | PRF_OWNED)
-        if not ok:
-            gdi32.BitBlt(mem, 0, 0, w, h, hdc, rect.left, rect.top, SRCCOPY)
+    if use_screen:
+        gdi32.BitBlt(mem, 0, 0, w, h, hdc, rect.left, rect.top, SRCCOPY)
     else:
-        gdi32.BitBlt(mem, 0, 0, w, h, hdc, src_x, src_y, SRCCOPY)
+        # PW_RENDERFULLCONTENT (2) makes PrintWindow redraw the GDI+ artwork
+        # too.  The source origin for a window DC is (0,0) -- using the
+        # screen position here shifts the whole capture by the window offset.
+        ok = user32.PrintWindow(hwnd, mem, 2)
+        if not ok:
+            ok = user32.PrintWindow(hwnd, mem,
+                                    PRF_CLIENT | PRF_CHILDREN | PRF_OWNED)
+        if not ok:
+            gdi32.BitBlt(mem, 0, 0, w, h, hdc, 0, 0, SRCCOPY)
 
     bmi = BITMAPINFO()
     bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
@@ -176,9 +199,18 @@ def main():
     ap.add_argument("--out", default="_capture/shot.png")
     ap.add_argument("--printwindow", action="store_true",
                     help="use PrintWindow instead of a screen grab")
+    ap.add_argument("--asis", action="store_true",
+                    help="grab the screen region exactly as-is, without "
+                         "raising the window (verifies what is really on top)")
     a = ap.parse_args()
     hwnd = find_window(a.title, a.pid)
-    capture(hwnd, a.out, use_screen=not a.printwindow)
+    title = ctypes.create_unicode_buffer(512)
+    user32.GetWindowTextW(hwnd, title, 512)
+    r = wintypes.RECT()
+    user32.GetWindowRect(hwnd, ctypes.byref(r))
+    print(f"target hwnd=0x{hwnd:X} title={title.value!r} rect=({r.left},{r.top})-({r.right},{r.bottom})")
+    capture(hwnd, a.out, use_screen=not a.printwindow,
+            raise_window=not a.asis)
     return 0
 
 
